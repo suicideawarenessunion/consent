@@ -1,132 +1,179 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Scan</title>
-  <style>
-    body {
-      background: black;
-      color: white;
-      text-align: center;
-      font-family: Arial, sans-serif;
-    }
-    video, canvas {
-      border-radius: 10px;
-      margin-top: 20px;
-      max-width: 90%;
-      height: auto;
-    }
-    #status {
-      margin-top: 20px;
-      font-size: 18px;
-      color: lightgreen;
-    }
-    #substatus {
-      margin-top: 8px;
-      font-size: 14px;
-      color: orange;
-    }
-  </style>
+<meta charset="utf-8">
+<title>Video Recorder</title>
+
+<style>
+  body { 
+    font-family: sans-serif; 
+    padding: 0; 
+    margin: 0; 
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    background: #f8f8f8;
+    height: 100vh;
+  }
+
+  h2 { margin: 10px 0; }
+
+  video {
+    width: 100%;
+    height: calc(100vh - 210px);
+    object-fit: cover;
+    background: black;
+  }
+
+  .controls {
+    display: flex;
+    gap: 10px;
+    margin: 10px 0;
+  }
+
+  button { 
+    padding: 12px 18px; 
+    font-size: 16px; 
+    cursor: pointer;
+  }
+
+  #toast {
+    visibility: hidden;
+    min-width: 250px;
+    background-color: #333;
+    color: #fff;
+    text-align: center;
+    border-radius: 4px;
+    padding: 16px;
+    position: fixed;
+    z-index: 1;
+    left: 50%;
+    bottom: 30px;
+    transform: translateX(-50%);
+    font-size: 17px;
+  }
+
+  #toast.show {
+    visibility: visible;
+    animation: fadein 0.5s, fadeout 0.5s 2.5s;
+  }
+
+  @keyframes fadein {
+    from { bottom: 0; opacity: 0; }
+    to { bottom: 30px; opacity: 1; }
+  }
+
+  @keyframes fadeout {
+    from { bottom: 30px; opacity: 1; }
+    to { bottom: 0; opacity: 0; }
+  }
+</style>
 </head>
+
 <body>
-  <h2>Scan</h2>
-  <video id="video" autoplay playsinline></video>
-  <canvas id="canvas" style="display:none;"></canvas>
-  <div id="status">Waiting for camera...</div>
-  <div id="substatus"></div>
 
-  <script>
-const API_URL = "https://borrapavani-newdocker.hf.space/predict";
-const TRIGGER_OTP_URL = "https://borrapavani-newdocker.hf.space/trigger_otp";
-const video = document.getElementById("video");
-const canvas = document.getElementById("canvas");
-const statusDiv = document.getElementById("status");
-const substatusDiv = document.getElementById("substatus");
+<h2>Video Recorder</h2>
 
-let policeCount = 0;
-const REQUIRED_FRAMES = 3;
-const CAPTURE_INTERVAL_MS = 3000;
-let captureLoop = null;
+<video id="preview" autoplay muted playsinline></video>
 
-// open front camera
+<div class="controls">
+  <button id="flipBtn">🔄 Flip Camera</button>
+  <button id="startBtn">Start</button>
+  <button id="stopBtn" disabled>Stop</button>
+</div>
+
+<div id="toast"></div>
+
+<script>
+let mediaRecorder;
+let recordedChunks = [];
+let currentStream;
+let currentFacing = "environment"; // default back camera
+
+const params = new URLSearchParams(window.location.search);
+const userEmail = params.get("email");
+const userName  = params.get("name");
+
+function showToast(msg) {
+  const toast = document.getElementById("toast");
+  toast.textContent = msg;
+  toast.className = "show";
+  setTimeout(() => toast.className = "", 3000);
+}
+
 async function startCamera() {
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" } });
-    video.srcObject = stream;
-    statusDiv.textContent = "Camera starting...";
-    waitForVideoReady();
-  } catch (err) {
-    statusDiv.textContent = "Camera access denied or not available.";
-    substatusDiv.textContent = err.message || "";
+  if (currentStream) {
+    currentStream.getTracks().forEach(t => t.stop());
   }
+
+  currentStream = await navigator.mediaDevices.getUserMedia({
+    audio: true,
+    video: { facingMode: { ideal: currentFacing } }
+  });
+
+  document.getElementById("preview").srcObject = currentStream;
+
+  // mirror only for front cam
+  document.getElementById("preview").style.transform =
+    currentFacing === "user" ? "scaleX(-1)" : "scaleX(1)";
 }
 
-// wait until camera has proper dimensions
-function waitForVideoReady() {
-  if (video.videoWidth > 0 && video.videoHeight > 0) {
-    statusDiv.textContent = "✅ Camera started. Ready to scan...";
-    startCaptureLoop();
-  } else {
-    requestAnimationFrame(waitForVideoReady);
-  }
-}
-
-// prediction loop
-function startCaptureLoop() {
-  if (captureLoop) clearInterval(captureLoop);
-
-  captureLoop = setInterval(async () => {
-    if (!video.videoWidth || !video.videoHeight) {
-      console.log("Video not ready yet...");
-      return;
-    }
-
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    const ctx = canvas.getContext("2d");
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-    canvas.toBlob(async (blob) => {
-      try {
-        const formData = new FormData();
-        formData.append("img", blob, "capture.png");
-        const res = await fetch(API_URL, { method: "POST", body: formData });
-        const result = await res.json();
-
-        if (result?.label === "Police" && result.confidence >= 0.8) {
-          policeCount++;
-          statusDiv.textContent = `✅ Detected (${policeCount}/${REQUIRED_FRAMES})`;
-          if (policeCount >= REQUIRED_FRAMES) {
-            statusDiv.textContent = "🔔 Confirmed — triggering OTP...";
-            const meta = { camera: "lobby-cam-1", ts: new Date().toISOString() };
-            const tRes = await fetch(TRIGGER_OTP_URL, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(meta),
-            });
-            const j = await tRes.json();
-            if (j.entry_url) window.location.href = j.entry_url;
-            policeCount = 0;
-          }
-        } else {
-          policeCount = 0;
-          statusDiv.textContent = "Rejected";
-        }
-      } catch (e) {
-        substatusDiv.textContent = "Network/API error";
-      }
-    }, "image/png");
-  }, CAPTURE_INTERVAL_MS);
-}
-
+// initial camera load
 startCamera();
 
-// cleanup
-window.addEventListener("beforeunload", () => {
-  if (captureLoop) clearInterval(captureLoop);
-  if (video.srcObject) video.srcObject.getTracks().forEach(t => t.stop());
-});
+// Flip Camera
+document.getElementById("flipBtn").onclick = async () => {
+  currentFacing = currentFacing === "user" ? "environment" : "user";
+  await startCamera();
+};
+
+// Start Recording
+document.getElementById("startBtn").onclick = () => {
+  recordedChunks = [];
+  mediaRecorder = new MediaRecorder(currentStream);
+
+  mediaRecorder.ondataavailable = e => {
+    if (e.data.size > 0) recordedChunks.push(e.data);
+  };
+
+  mediaRecorder.start();
+  startBtn.disabled = true;
+  stopBtn.disabled = false;
+};
+
+// Stop Recording
+document.getElementById("stopBtn").onclick = () => {
+  mediaRecorder.stop();
+  currentStream.getTracks().forEach(track => track.stop());
+
+  mediaRecorder.onstop = () => {
+    const blob = new Blob(recordedChunks, { type: "video/mp4" });
+    const reader = new FileReader();
+
+    reader.onloadend = () => {
+      const base64Data = reader.result.split(",")[1];
+
+      fetch("https://3299cb60efafe263a7276ab328834e.db.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/334d4c7c43fc45cfb26d29910cf613d2/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=85YJTElGV4e568r9HA58gkQExjZequ_P3KOXOVuo5Wo", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          filename: "video_" + Date.now() + ".mp4",
+          filedata: base64Data,
+          userEmail,
+          userName
+        })
+      })
+      .then(() => showToast("Video uploaded successfully!"))
+      .catch(() => showToast("Upload failed"));
+    };
+
+    reader.readAsDataURL(blob);
+  };
+
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+};
 </script>
+
 </body>
 </html>
